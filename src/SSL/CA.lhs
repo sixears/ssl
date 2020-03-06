@@ -17,19 +17,11 @@ where
 
 -- base --------------------------------
 
-import Control.Monad  ( return )
+import Control.Monad  ( forM_, return )
 import Data.Function  ( ($) )
 import Data.Maybe     ( Maybe( Just, Nothing ) )
 import System.Exit    ( ExitCode( ExitSuccess ) )
 import System.IO      ( IO )
-
--- base-unicode-symbols ----------------
-
-import Data.Function.Unicode  ( (∘) )
-
--- data-textual ------------------------
-
-import Data.Textual  ( Printable, toString )
 
 -- exited ------------------------------
 
@@ -37,42 +29,19 @@ import Exited  ( doMain )
 
 -- fpath --------------------------------
 
-import FPath.Dir  ( Dir( DirA ) )
-
--- mtl ---------------------------------
-
-import Control.Monad.Except  ( MonadError, throwError )
-import Control.Monad.Trans   ( lift )
-
--- monaderror-io -----------------------
-
-import MonadError.IO.Error  ( AsIOError, userE )
-
--- monadio-plus ------------------------
-
-import MonadIO.File2  ( CanAccess( CanAccess, NoCanAccess ), CanExec( CanExec )
-                      , CanRead( CanRead ), CanWrite( CanWrite )
-                      )
+import FPath.RelDir   ( reldir )
+import FPath.RelFile  ( relfile )
 
 -- more-unicode ------------------------
 
-import Data.MoreUnicode.Lens     ( (⊣) )
-import Data.MoreUnicode.Monad    ( (≫) )
+import Data.MoreUnicode.Lens  ( (⊣) )
 
 -- proclib -----------------------------
 
 import ProcLib.Error.FPathError   ( FPathIOExecCreateError )
-import ProcLib.MonadIO.Directory  ( mkdir )
-import ProcLib.MonadIO.File       ( access, stat )
+import ProcLib.MonadIO.Directory  ( chdir, ensureEmptyDir, mkdir )
+import ProcLib.MonadIO.File       ( touch, writeFile )
 import ProcLib.Process            ( doProcIO )
-
--- tfmt --------------------------------
-
-import Text.Fmt  ( fmtT )
-
--- unix --------------------------------
-
-import System.Posix.Files      ( isDirectory )
 
 ------------------------------------------------------------
 --                     local imports                      --
@@ -81,6 +50,12 @@ import System.Posix.Files      ( isDirectory )
 import SSL.CA.Options  ( optsParse, topDir )
 
 --------------------------------------------------------------------------------
+
+main ∷ IO ()
+main = doMain @FPathIOExecCreateError $ do
+  opts ← optsParse Nothing "show env, pwd"
+  let top_dir = opts ⊣ topDir
+  doProcIO opts $ do
 
 ```
 
@@ -113,8 +88,8 @@ certificate (`ca.cert.pem`). This pair forms the identity of your CA.
 
 Typically, the root CA does not sign server or client certificates directly. The
 root CA is only ever used to create one or more intermediate CAs, which are
-trusted by the root CA to sign certificates on their behalf. This is best
-practice. It allows the root key to be kept offline and unused as much as
+trusted by the root CA to sign certificates on their behalf. This
+practice allows the root key to be kept offline and unused as much as
 possible, as any compromise of the root key is disastrous.
 
 *Note:* It’s best practice to create the root pair in a secure
@@ -126,16 +101,26 @@ fill the ethernet port with glue.
 
 Choose a directory (e.g., `/root/ca`) to store all keys and certificates.
 
->    mkdir /root/ca
+```haskell
+
+  ensureEmptyDir top_dir
+
+```
+
 
 Create the directory structure. The index.txt and serial files act as a flat
 file database to keep track of signed certificates.
 
->    cd /root/ca
->    mkdir certs crl newcerts private
->    chmod 700 private
->    touch index.txt
->    echo 1000 > serial
+```haskell
+
+    chdir top_dir
+    
+    forM_ [ [reldir|certs/|],[reldir|crl/|],[reldir|newcerts/|] ] (mkdir 0o755)
+    mkdir 0o700 [reldir|private/|]
+    touch (Just 0o600) [relfile|index.txt|]
+    writeFile [relfile|serial|] "1000"
+
+```
 
 
         Prepare the configuration file
@@ -394,23 +379,6 @@ X509v3 extensions:
         Digital Signature, Certificate Sign, CRL Sign
 
 ```haskell
-
-uE ∷ (AsIOError ε, MonadError ε η, Printable τ) ⇒ τ → η ω
-uE = throwError ∘ userE ∘ toString
-
-main ∷ IO ()
-main = doMain @FPathIOExecCreateError $ do
-  opts ← optsParse Nothing "show env, pwd"
-  let top_dir = opts ⊣ topDir
-  doProcIO opts $ do
-    stat top_dir ≫ \ case
-      Nothing → mkdir 0o700 (DirA $ top_dir)
-      Just st → if isDirectory st
-                then do access CanRead CanWrite CanExec top_dir ≫ \ case
-                          CanAccess   → return ()
-                          NoCanAccess →
-                            lift ∘ uE $ [fmtT|cannot rwx directory: %T|] top_dir
-                else lift $ uE $ [fmtT|is not a directory: %T|] top_dir
 
   return ExitSuccess
 
