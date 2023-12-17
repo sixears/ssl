@@ -84,7 +84,7 @@ import ProcLib.Types.ProcIO        ( ProcIO )
 
 mkdir ∷ (MonadIO μ, AsIOError ε, DirAs δ) ⇒ FileMode → δ → ProcIO ε μ ()
 mkdir mode d =
-  mkIO ([fmt|mkdir %04o %T|] mode d) (MonadIO.Directory.mkdir mode d)
+  mkIO ([fmt|mkdir 0%04o %T|] mode d) (MonadIO.Directory.mkdir mode d)
 
 ----------------------------------------
 

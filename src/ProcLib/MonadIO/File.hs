@@ -88,13 +88,16 @@ fexists f = mkIO'2 FExists ([fmt|fexist %T|] $ f ⫥ filepath)
 touch ∷ ∀ τ ε μ .
         (MonadIO μ, AsIOError ε, FileAs τ) ⇒ Maybe FileMode → τ → ProcIO ε μ ()
 touch Nothing fn = mkIO ([fmt|touch %T|] fn) (MonadIO.File2.touch Nothing fn)
-touch mmode@(Just mode) fn = mkIO ([fmt|touch %04o %T|] mode fn)
+touch mmode@(Just mode) fn = mkIO ([fmt|touch 0%04o %T|] mode fn)
                                   (MonadIO.File2.touch mmode fn)
 
 ----------------------------------------
 
 writeFile ∷ ∀ ε π μ . (MonadIO μ, AsIOError ε, FileAs π) ⇒
-            π → Text → ProcIO ε μ ()
-writeFile fn = mkIO ([fmt|write %T|] fn) ∘ (MonadIO.File2.writeFile fn)
+            Maybe FileMode → π → Text → ProcIO ε μ ()
+writeFile (Just m) fn =
+  mkIO ([fmt|write 0%04o %T|] m fn) ∘ (MonadIO.File2.writeFile (Just m) fn)
+writeFile Nothing fn =
+  mkIO ([fmt|write ----- %T|] fn) ∘ (MonadIO.File2.writeFile Nothing fn)
 
 -- that's all, folks! ----------------------------------------------------------

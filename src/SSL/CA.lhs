@@ -19,9 +19,14 @@ where
 
 import Control.Monad  ( forM_, return )
 import Data.Function  ( ($) )
+import Data.List      ( intersperse )
 import Data.Maybe     ( Maybe( Just, Nothing ) )
 import System.Exit    ( ExitCode( ExitSuccess ) )
 import System.IO      ( IO )
+
+-- base-unicode-symbols ----------------
+
+import Data.Monoid.Unicode  ( (⊕) )
 
 -- exited ------------------------------
 
@@ -29,19 +34,30 @@ import Exited  ( doMain )
 
 -- fpath --------------------------------
 
-import FPath.RelDir   ( reldir )
-import FPath.RelFile  ( relfile )
+import FPath.AsFilePath  ( filepath )
+import FPath.RelDir      ( reldir )
+import FPath.RelFile     ( relfile )
 
 -- more-unicode ------------------------
 
-import Data.MoreUnicode.Lens  ( (⊣) )
+import Data.MoreUnicode.Lens    ( (⊣), (⫥) )
+import Data.MoreUnicode.Monoid  ( ю )
 
 -- proclib -----------------------------
 
 import ProcLib.Error.FPathError   ( FPathIOExecCreateError )
 import ProcLib.MonadIO.Directory  ( chdir, ensureEmptyDir, mkdir )
 import ProcLib.MonadIO.File       ( touch, writeFile )
-import ProcLib.Process            ( doProcIO )
+import ProcLib.Process            ( doProcIO, mkProc )
+import ProcLib.Types.CmdSpec      ( CmdSpec( CmdSpec ) )
+
+-- text --------------------------------
+
+import Data.Text  ( init, pack, unlines )
+
+-- text-fmt ----------------------------
+
+import Text.Fmt  ( fmt )
 
 ------------------------------------------------------------
 --                     local imports                      --
@@ -103,203 +119,292 @@ Choose a directory (e.g., `/root/ca`) to store all keys and certificates.
 
 ```haskell
 
-  ensureEmptyDir top_dir
+    ensureEmptyDir top_dir
 
 ```
 
-
-Create the directory structure. The index.txt and serial files act as a flat
+Create the directory structure. The `index.txt` and `serial` files act as a flat
 file database to keep track of signed certificates.
 
 ```haskell
 
     chdir top_dir
-    
+
     forM_ [ [reldir|certs/|],[reldir|crl/|],[reldir|newcerts/|] ] (mkdir 0o755)
     mkdir 0o700 [reldir|private/|]
-    touch (Just 0o600) [relfile|index.txt|]
-    writeFile [relfile|serial|] "1000"
+    touch (Just 0o644) [relfile|index.txt|]
+    writeFile (Just 0o644) [relfile|serial|] "1000"
 
 ```
 
+=== Prepare the configuration file (`openssl.conf`).
 
-        Prepare the configuration file
-        Create the root key
-        Create the root certificate
-        Verify the root certificate
-    Create the intermediate pair
-    Sign server and client certificates
-    Certificate revocation lists
-    Online Certificate Status Protocol
-    Appendix
+You must create a configuration file for OpenSSL to use.
 
-=== Prepare the configuration file
+The `[ ca ]` section is mandatory. Here we tell OpenSSL to use the options from
+the `[ CA_default ]` section.
 
-You must create a configuration file for OpenSSL to use. Copy the root CA configuration file from the Appendix to /root/ca/openssl.cnf.
+```haskell
 
-The [ ca ] section is mandatory. Here we tell OpenSSL to use the options from the [ CA_default ] section.
+    let ca_section = [ "# `man ca`"
+                     , "default_ca = CA_default" ]
 
-[ ca ]
-# `man ca`
-default_ca = CA_default
+```
 
-The [ CA_default ] section contains a range of defaults. Make sure you declare the directory you chose earlier (/root/ca).
+The `[ CA_default ]` section contains a range of defaults. Make sure you declare
+the directory you chose earlier.
 
-[ CA_default ]
-# Directory and file locations.
-dir               = /root/ca
-certs             = $dir/certs
-crl_dir           = $dir/crl
-new_certs_dir     = $dir/newcerts
-database          = $dir/index.txt
-serial            = $dir/serial
-RANDFILE          = $dir/private/.rand
+```haskell
 
-# The root key and root certificate.
-private_key       = $dir/private/ca.key.pem
-certificate       = $dir/certs/ca.cert.pem
+    let dir = init $ pack (top_dir ⫥ filepath) -- drop the trailing / for .cnf
+        ca_default_section = [ "# Directory and file locations."
+                             , "dir               = " ⊕ dir
+                             , "certs             = $dir/certs"
+                             , "crl_dir           = $dir/crl"
+                             , "new_certs_dir     = $dir/newcerts"
+                             , "database          = $dir/index.txt"
+                             , "serial            = $dir/serial"
+                             , "RANDFILE          = $dir/private/.rand"
+                             , ""
+                             , "# The root key and root certificate."
+                             , "private_key       = $dir/private/ca.key.pem"
+                             , "certificate       = $dir/certs/ca.cert.pem"
+                             , ""
+                             , "# For certificate revocation lists."
+                             , "crlnumber         = $dir/crlnumber"
+                             , "crl               = $dir/crl/ca.crl.pem"
+                             , "crl_extensions    = crl_ext"
+                             , "default_crl_days  = 30"
+                             , ""
+                             , "# SHA-1 is deprecated, so use SHA-2 instead."
+                             , "default_md        = sha256"
+                             , ""
+                             , "name_opt          = ca_default"
+                             , "cert_opt          = ca_default"
+                             , "default_days      = 375"
+                             , "preserve          = no"
+                             , "policy            = policy_strict"
+                             ]
+```
 
-# For certificate revocation lists.
-crlnumber         = $dir/crlnumber
-crl               = $dir/crl/ca.crl.pem
-crl_extensions    = crl_ext
-default_crl_days  = 30
+We’ll apply policy_strict for all root CA signatures, as the root CA is only
+being used to create intermediate CAs.
 
-# SHA-1 is deprecated, so use SHA-2 instead.
-default_md        = sha256
+```haskell
 
-name_opt          = ca_default
-cert_opt          = ca_default
-default_days      = 375
-preserve          = no
-policy            = policy_strict
+    let policy_strict_section =
+          [ "# The root CA should only sign intermediate certificates "
+          , "# that match."
+          , "# See the POLICY FORMAT section of `man ca`."
+          , "countryName             = match"
+          , "stateOrProvinceName     = match"
+          , "organizationName        = match"
+          , "organizationalUnitName  = optional"
+          , "commonName              = supplied"
+          , "emailAddress            = optional"
+          ]
+```
 
-We’ll apply policy_strict for all root CA signatures, as the root CA is only being used to create intermediate CAs.
+We’ll apply policy_loose for all intermediate CA signatures, as the intermediate
+CA is signing server and client certificates that may come from a variety of
+third-parties.
 
-[ policy_strict ]
-# The root CA should only sign intermediate certificates that match.
-# See the POLICY FORMAT section of `man ca`.
-countryName             = match
-stateOrProvinceName     = match
-organizationName        = match
-organizationalUnitName  = optional
-commonName              = supplied
-emailAddress            = optional
+```haskell
 
-We’ll apply policy_loose for all intermediate CA signatures, as the intermediate CA is signing server and client certificates that may come from a variety of third-parties.
+    let policy_loose_section =
+          [ "# Allow the intermediate CA to sign a more diverse range of"
+          , "# certificates."
+          , "# See the POLICY FORMAT section of the `ca` man page."
+          , "countryName             = optional"
+          , "stateOrProvinceName     = optional"
+          , "localityName            = optional"
+          , "organizationName        = optional"
+          , "organizationalUnitName  = optional"
+          , "commonName              = supplied"
+          , "emailAddress            = optional"
+          ]
 
-[ policy_loose ]
-# Allow the intermediate CA to sign a more diverse range of certificates.
-# See the POLICY FORMAT section of the `ca` man page.
-countryName             = optional
-stateOrProvinceName     = optional
-localityName            = optional
-organizationName        = optional
-organizationalUnitName  = optional
-commonName              = supplied
-emailAddress            = optional
+```
 
-Options from the [ req ] section are applied when creating certificates or certificate signing requests.
+Options from the [ req ] section are applied when creating certificates or
+certificate signing requests.
 
-[ req ]
-# Options for the `req` tool (`man req`).
-default_bits        = 2048
-distinguished_name  = req_distinguished_name
-string_mask         = utf8only
+```haskell
 
-# SHA-1 is deprecated, so use SHA-2 instead.
-default_md          = sha256
+    let req_section =
+          [ "# Options for the `req` tool (`man req`)."
+          , "default_bits        = 2048"
+          , "distinguished_name  = req_distinguished_name"
+          , "string_mask         = utf8only"
+          , ""
+          , "# SHA-1 is deprecated, so use SHA-2 instead."
+          , "default_md          = sha256"
+          , ""
+          , "# Extension to add when the -x509 option is used."
+          , "x509_extensions     = v3_ca"
+          ]
+```
 
-# Extension to add when the -x509 option is used.
-x509_extensions     = v3_ca
+The [ req_distinguished_name ] section declares the information normally
+required in a certificate signing request. You can optionally specify some
+defaults.
 
-The [ req_distinguished_name ] section declares the information normally required in a certificate signing request. You can optionally specify some defaults.
+```haskell
 
-[ req_distinguished_name ]
-# See <https://en.wikipedia.org/wiki/Certificate_signing_request>.
-countryName                     = Country Name (2 letter code)
-stateOrProvinceName             = State or Province Name
-localityName                    = Locality Name
-0.organizationName              = Organization Name
-organizationalUnitName          = Organizational Unit Name
-commonName                      = Common Name
-emailAddress                    = Email Address
+    let req_distinguished_name_section =
+          [ "# See <https://en.wikipedia.org/wiki/Certificate_signing_request>."
+          , "countryName                     = Country Name (2 letter code)"
+          , "stateOrProvinceName             = State or Province Name"
+          , "localityName                    = Locality Name"
+          , "0.organizationName              = Organization Name"
+          , "organizationalUnitName          = Organizational Unit Name"
+          , "commonName                      = Common Name"
+          , "emailAddress                    = Email Address"
+          , ""
+          , "# Optionally, specify some defaults."
+          , "countryName_default             = GB"
+          , "stateOrProvinceName_default     = England"
+          , "localityName_default            ="
+          , "0.organizationName_default      = Sixears"
+          , "#organizationalUnitName_default ="
+          , "#emailAddress_default           ="
+          ]
+```
 
-# Optionally, specify some defaults.
-countryName_default             = GB
-stateOrProvinceName_default     = England
-localityName_default            =
-0.organizationName_default      = Alice Ltd
-#organizationalUnitName_default =
-#emailAddress_default           =
-
-The next few sections are extensions that can be applied when signing certificates. For example, passing the -extensions v3_ca command-line argument will apply the options set in [ v3_ca ].
+The next few sections are extensions that can be applied when signing
+certificates. For example, passing the -extensions v3_ca command-line argument
+will apply the options set in [ v3_ca ].
 
 We’ll apply the v3_ca extension when we create the root certificate.
 
-[ v3_ca ]
-# Extensions for a typical CA (`man x509v3_config`).
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid:always,issuer
-basicConstraints = critical, CA:true
-keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+```haskell
 
-We’ll apply the v3_ca_intermediate extension when we create the intermediate certificate. pathlen:0 ensures that there can be no further certificate authorities below the intermediate CA.
+    let v3_ca_section =
+          [ "# Extensions for a typical CA (`man x509v3_config`)."
+          , "subjectKeyIdentifier = hash"
+          , "authorityKeyIdentifier = keyid:always,issuer"
+          , "basicConstraints = critical, CA:true"
+          , "keyUsage = critical, digitalSignature, cRLSign, keyCertSign"
+          ]
+```
 
-[ v3_intermediate_ca ]
-# Extensions for a typical intermediate CA (`man x509v3_config`).
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid:always,issuer
-basicConstraints = critical, CA:true, pathlen:0
-keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+We’ll apply the v3_ca_intermediate extension when we create the intermediate
+certificate. pathlen:0 ensures that there can be no further certificate
+authorities below the intermediate CA.
 
-We’ll apply the usr_cert extension when signing client certificates, such as those used for remote user authentication.
+```haskell
 
-[ usr_cert ]
-# Extensions for client certificates (`man x509v3_config`).
-basicConstraints = CA:FALSE
-nsCertType = client, email
-nsComment = "OpenSSL Generated Client Certificate"
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid,issuer
-keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
-extendedKeyUsage = clientAuth, emailProtection
+    let v3_intermediate_ca_section =
+          [ "# Extensions for a typical intermediate CA (`man x509v3_config`)."
+          , "subjectKeyIdentifier = hash"
+          , "authorityKeyIdentifier = keyid:always,issuer"
+          , "basicConstraints = critical, CA:true, pathlen:0"
+          , "keyUsage = critical, digitalSignature, cRLSign, keyCertSign"
+          ]
+```
 
-We’ll apply the server_cert extension when signing server certificates, such as those used for web servers.
+We’ll apply the usr_cert extension when signing client certificates, such as
+those used for remote user authentication.
 
-[ server_cert ]
-# Extensions for server certificates (`man x509v3_config`).
-basicConstraints = CA:FALSE
-nsCertType = server
-nsComment = "OpenSSL Generated Server Certificate"
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid,issuer:always
-keyUsage = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
+```haskell
 
-The crl_ext extension is automatically applied when creating certificate revocation lists.
+    let usr_cert_section =
+          [ "# Extensions for client certificates (`man x509v3_config`)."
+          , "basicConstraints = CA:FALSE"
+          , "nsCertType = client, email"
+          , "nsComment = \"OpenSSL Generated Client Certificate\""
+          , "subjectKeyIdentifier = hash"
+          , "authorityKeyIdentifier = keyid,issuer"
+          ,   "keyUsage = "
+            ⊕ "critical, nonRepudiation, digitalSignature, keyEncipherment"
+          , "extendedKeyUsage = clientAuth, emailProtection"
+          ]
+```
 
-[ crl_ext ]
-# Extension for CRLs (`man x509v3_config`).
-authorityKeyIdentifier=keyid:always
+We’ll apply the server_cert extension when signing server certificates, such as
+those used for web servers.
 
-We’ll apply the ocsp extension when signing the Online Certificate Status Protocol (OCSP) certificate.
+```haskell
 
-[ ocsp ]
-# Extension for OCSP signing certificates (`man ocsp`).
-basicConstraints = CA:FALSE
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid,issuer
-keyUsage = critical, digitalSignature
-extendedKeyUsage = critical, OCSPSigning
+    let server_cert_section =
+          [ "# Extensions for server certificates (`man x509v3_config`)."
+          , "basicConstraints = CA:FALSE"
+          , "nsCertType = server"
+          , "nsComment = \"OpenSSL Generated Server Certificate\""
+          , "subjectKeyIdentifier = hash"
+          , "authorityKeyIdentifier = keyid,issuer:always"
+          , "keyUsage = critical, digitalSignature, keyEncipherment"
+          , "extendedKeyUsage = serverAuth"
+          ]
+```
 
-Create the root key
+The crl_ext extension is automatically applied when creating certificate
+revocation lists.
 
-Create the root key (ca.key.pem) and keep it absolutely secure. Anyone in possession of the root key can issue trusted certificates. Encrypt the root key with AES 256-bit encryption and a strong password.
+```haskell
 
-Note
+    let crl_ext_section =
+          [ "# Extension for CRLs (`man x509v3_config`)."
+          , "authorityKeyIdentifier=keyid:always"
+          ]
+```
 
-Use 4096 bits for all root and intermediate certificate authority keys. You’ll still be able to sign server and client certificates of a shorter length.
+We’ll apply the ocsp extension when signing the Online Certificate Status
+Protocol (OCSP) certificate.
+
+```haskell
+
+    let ocsp_section =
+          [ "# Extension for OCSP signing certificates (`man ocsp`)."
+          , "basicConstraints = CA:FALSE"
+          , "subjectKeyIdentifier = hash"
+          , "authorityKeyIdentifier = keyid,issuer"
+          , "keyUsage = critical, digitalSignature"
+          , "extendedKeyUsage = critical, OCSPSigning"
+          ]
+```
+
+Copy the root CA configuration file to `openssl.cnf`.
+
+```haskell
+
+    let confs = [ ("ca"                    , ca_section)
+                , ("CA_default"            , ca_default_section)
+                , ("policy_strict"         , policy_strict_section)
+                , ("policy_loose"          , policy_loose_section)
+                , ("req"                   , req_section)
+                , ("req_distinguished_name", req_distinguished_name_section)
+                , ("v3_ca"                 , v3_ca_section)
+                , ("v3_intermediate_ca"    , v3_intermediate_ca_section)
+                , ("usr_cert"              , usr_cert_section)
+                , ("crl_ext"               , crl_ext_section)
+                , ("server_cert"           , server_cert_section)
+                , ("ocsp"                  , ocsp_section)
+                ]
+        conf_text =
+          ю $ intersperse [""]
+                          [ [fmt|[ %t ]|] title:section |(title,section)←confs ]
+    writeFile (Just 0o644) [relfile|openssl.cnf|] (unlines conf_text)
+
+```
+
+=== Create the root key
+
+Create the root key (ca.key.pem) and keep it absolutely secure. Anyone in
+possession of the root key can issue trusted certificates. Encrypt the root key
+with AES 256-bit encryption and a strong password.
+
+==== **Note**
+
+Use 4096 bits for all root and intermediate certificate authority keys. You’ll
+still be able to sign server and client certificates of a shorter length.
+
+```haskell
+
+    --- USE FULL PATH
+    mkProc  (CmdSpec [relfile|openssl|] [])
+
+```
 
 # cd /root/ca
 # openssl genrsa -aes256 -out private/ca.key.pem 4096
@@ -309,7 +414,7 @@ Verifying - Enter pass phrase for ca.key.pem: secretpassword
 
 # chmod 400 private/ca.key.pem
 
-Create the root certificate
+=== Create the root certificate
 
 Use the root key (ca.key.pem) to create a root certificate (ca.cert.pem). Give the root certificate a long expiry date, such as twenty years. Once the root certificate expires, all certificates signed by the CA become invalid.
 
@@ -317,7 +422,7 @@ Warning
 
 Whenever you use the req tool, you must specify a configuration file to use with the -config option, otherwise OpenSSL will default to /etc/pki/tls/openssl.cnf.
 
-# cd /root/ca
+
 # openssl req -config openssl.cnf \
       -key private/ca.key.pem \
       -new -x509 -days 7300 -sha256 -extensions v3_ca \
@@ -337,7 +442,7 @@ Email Address []:
 
 # chmod 444 certs/ca.cert.pem
 
-Verify the root certificate
+=== Verify the root certificate
 
 # openssl x509 -noout -text -in certs/ca.cert.pem
 
@@ -377,6 +482,12 @@ X509v3 extensions:
         CA:TRUE
     X509v3 Key Usage: critical
         Digital Signature, Certificate Sign, CRL Sign
+
+== Create the intermediate pair
+== Sign server and client certificates
+== Certificate revocation lists
+== Online Certificate Status Protocol
+== Appendix
 
 ```haskell
 

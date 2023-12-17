@@ -4,12 +4,13 @@
 {-# LANGUAGE UnicodeSyntax     #-}
 
 module MonadError.IO.Error2
-  ( mkNoExistsE, squashNoSuchThingBT )
+  ( mkNoExistsE, noExistsE, squashNoSuchThingBT )
 where
 
 -- base --------------------------------
 
 import Control.Monad    ( join )
+import Data.Function    ( ($) )
 import Data.Functor     ( fmap )
 import Data.Maybe       ( Maybe( Just, Nothing ) )
 import System.IO.Error  ( doesNotExistErrorType, mkIOError )
@@ -39,7 +40,7 @@ import MonadError.IO.Error   ( AsIOError( _IOErr ), squashNoSuchThingB )
 
 -- mtl ---------------------------------
 
-import Control.Monad.Except  ( ExceptT, MonadError )
+import Control.Monad.Except  ( ExceptT, MonadError, throwError )
 
 -- text --------------------------------
 
@@ -65,5 +66,8 @@ mkNoExistsE ∷ (AsIOError ε, FPathAs τ) ⇒ Text → τ → ε
 mkNoExistsE n fp =
   _IOErr # mkIOError doesNotExistErrorType ([fmt|%t: no such file|] n) Nothing
                                            (Just (fp ⫥ filepath))
+
+noExistsE ∷ (AsIOError ε, MonadError ε η, FPathAs τ) ⇒ Text → τ → η α
+noExistsE n fp = throwError $ mkNoExistsE n fp
 
 -- that's all, folks! ----------------------------------------------------------

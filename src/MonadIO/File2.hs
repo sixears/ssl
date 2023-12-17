@@ -25,13 +25,14 @@ import Data.Functor   ( fmap )
 import Data.Maybe     ( Maybe( Just, Nothing ) )
 import Data.String    ( String )
 import System.Exit    ( ExitCode )
-import System.IO      ( IO, IOMode( AppendMode ), withFile )
+import System.IO      ( IO, IOMode( AppendMode ), hClose, withFile )
 import Text.Show      ( Show( show ) )
 
 -- base-unicode-symbols ----------------
 
 import Data.Eq.Unicode        ( (≡) )
 import Data.Function.Unicode  ( (∘) )
+import Data.Monoid.Unicode    ( (⊕) )
 
 -- data-textual ------------------------
 
@@ -68,7 +69,7 @@ import Data.MoreUnicode.Natural  ( ℕ )
 
 -- mtl ---------------------------------
 
-import Control.Monad.Except  ( MonadError )
+import Control.Monad.Except  ( MonadError, throwError )
 
 -- tasty -------------------------------
 
@@ -91,6 +92,7 @@ import System.IO.Temp ( withSystemTempFile )
 import qualified  Data.Text.IO
 
 import Data.Text     ( Text )
+import Data.Text.IO  ( hPutStr )
 
 -- text-printer ------------------------
 
@@ -102,9 +104,11 @@ import Text.Fmt  ( fmt )
 
 -- unix --------------------------------
 
-import System.Posix.Files  ( FileStatus, fileAccess, fileExist, fileMode
-                           , getFileStatus, isDirectory, removeLink, setFileMode
+import System.Posix.Files  ( FileStatus
+                           , fileAccess, fileExist, fileMode, getFileStatus
+                           , isDirectory, rename, removeLink, setFileMode
                            )
+import System.Posix.Temp   ( mkstemp )
 import System.Posix.Types  ( FileMode )
 
 ------------------------------------------------------------
@@ -207,8 +211,7 @@ instance Printable FileStat where
   print (FileStat Nothing)   = P.text $ "-"
 
 stat ∷ ∀ ε τ μ .
-       (MonadIO μ, AsIOError ε, MonadError ε μ, FPathAs τ) ⇒
-       τ → μ FileStat
+       (MonadIO μ, AsIOError ε, MonadError ε μ, FPathAs τ) ⇒ τ → μ FileStat
 stat = FileStat ⩺ squashNoSuchThingT ∘ asIOError ∘ getFileStatus ∘ (⫥ filepath)
 
 {- | An empty FileStat, to use as a default. -}
@@ -318,8 +321,19 @@ unlink f = asIOError $ removeLink (f ⫥ filepath)
 ----------------------------------------
 
 writeFile ∷ ∀ ε π μ .
-            (MonadIO μ, AsIOError ε, MonadError ε μ, FileAs π) ⇒ π → Text → μ ()
-writeFile fn = asIOError ∘ Data.Text.IO.writeFile (fn ⫥ filepath)
+            (MonadIO μ, AsIOError ε, MonadError ε μ, FileAs π) ⇒
+            Maybe FileMode → π → Text → μ ()
+writeFile Nothing fn t =
+  fexists fn ≫ \ case
+                 NoFExists→throwError $ mkNoExistsE "writeFile" fn
+                 FExists  →asIOError $ Data.Text.IO.writeFile (fn ⫥ filepath) t
+writeFile (Just m) fn t = let fp = fn ⫥ filepath
+                           in asIOError $ do
+                                (tmpfp,tmpfh) ← mkstemp $ fp ⊕ "-"
+                                setFileMode tmpfp m
+                                hPutStr tmpfh t
+                                hClose tmpfh
+                                rename tmpfp fp
 
 --------------------------------------------------------------------------------
 --                                   tests                                    --
